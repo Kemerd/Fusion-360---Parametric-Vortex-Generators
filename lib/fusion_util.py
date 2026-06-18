@@ -58,16 +58,33 @@ def set_param(design, name, value_mm, comment=""):
     return params.add(name, value, "mm", comment)
 
 
-def new_component(design, name):
-    """Add a fresh empty component to the root and return its occurrence.
+class _RootTarget:
+    """Lightweight stand-in for an occurrence that just exposes .component.
 
-    Each generated part (vane, jig, wing) lives in its own component so the
-    browser tree stays tidy and parts can be moved/copied independently.
+    Every builder writes ``occ = new_component(...); comp = occ.component``.
+    We build all geometry in the ROOT component rather than sub-components so
+    the add-in works in BOTH document types: a 'Part Design' document allows
+    only ONE component (so addNewComponent throws there), while an 'Assembly'
+    document allows many. Bodies -- not components -- are unlimited in both, and
+    for a print/export workflow separate bodies are exactly what we want. This
+    wrapper lets the existing call sites keep working unchanged: .component is
+    the root component, where the bodies land.
     """
-    root = design.rootComponent
-    occ = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
-    occ.component.name = name
-    return occ
+
+    def __init__(self, component):
+        self.component = component
+
+
+def new_component(design, name):
+    """Return a build target (the ROOT component) for a named part.
+
+    Despite the historical name, this no longer creates a sub-component -- it
+    returns the root component wrapped so callers can keep using `.component`.
+    Each part's bodies are named individually by the builders, which keeps the
+    browser readable without needing one component per part (forbidden in Part
+    Design documents).
+    """
+    return _RootTarget(design.rootComponent)
 
 
 def sketch_on_plane(component, plane):
@@ -89,8 +106,19 @@ def closed_polyline(sketch, pts_mm):
         pt3.append(adsk.core.Point3D.create(x * config.MM, y * config.MM, 0.0))
     for i in range(n):
         lines.addByTwoPoints(pt3[i], pt3[(i + 1) % n])
-    # A single closed loop yields exactly one profile.
-    return sketch.profiles.item(0)
+
+    # The closed loop yields a profile, but Fusion populates sketch.profiles
+    # lazily; a freshly-drawn loop may need the profiles recomputed before the
+    # collection is non-empty. Guard explicitly rather than trusting item(0),
+    # and return the LAST profile so multiple loops drawn in one sketch (we
+    # never do, but it is the safe choice) pick up the one just closed.
+    profs = sketch.profiles
+    if profs.count == 0:
+        raise RuntimeError(
+            "closed_polyline: no profile formed -- the polyline did not close "
+            f"(got {n} points). Check the point list forms a simple loop."
+        )
+    return profs.item(profs.count - 1)
 
 
 def extrude(component, profile, distance_mm, symmetric=False, operation=None):
@@ -103,17 +131,16 @@ def extrude(component, profile, distance_mm, symmetric=False, operation=None):
     extrudes = component.features.extrudeFeatures
     if operation is None:
         operation = adsk.fusion.FeatureOperations.NewBodyFeatureOperation
-    dist = adsk.core.ValueInput.createByReal(distance_mm * config.MM)
     inp = extrudes.createInput(profile, operation)
     if symmetric:
-        extent = adsk.fusion.SymmetricExtentDefinition.create(
-            adsk.core.ValueInput.createByReal(distance_mm * config.MM),
-            True,  # full length is symmetric about the plane
-        )
-        inp.setOneSideExtent(
-            extent, adsk.fusion.ExtentDirections.PositiveExtentDirection
-        )
+        # Symmetric about the sketch plane: setSymmetricExtent takes the FULL
+        # length and a 'isFullLength' flag. (The earlier setOneSideExtent +
+        # SymmetricExtentDefinition combination is not the supported call and
+        # throws.) Full distance, split evenly each side of the plane.
+        full = adsk.core.ValueInput.createByReal(distance_mm * config.MM)
+        inp.setSymmetricExtent(full, True)
     else:
+        dist = adsk.core.ValueInput.createByReal(distance_mm * config.MM)
         inp.setDistanceExtent(False, dist)
     return extrudes.add(inp)
 
