@@ -1,0 +1,13 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "addin",
+    "id": "glasairvg.vortexgenerator.addin",
+    "author": "GlasairVG",
+    "description": {
+        "": "Parametric delta vortex-generator vane and placement-jig generator. Reads airfoil data and printer/aircraft parameters and builds fully editable Fusion bodies; defaults reproduce the Glasair III CFD-winning 6 mm delta @ 7% chord, 70 mm, 10 deg toe-out."
+    },
+    "version": "1.0.0",
+    "runOnStartup": true,
+    "supportedOS": "windows|mac",
+    "editEnabled": true
+}
