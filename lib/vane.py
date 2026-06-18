@@ -75,16 +75,18 @@ def build_vane(design, params, seat, toe_sign=0.0, seat_to_surface=True,
 
     # ---- the delta fin --------------------------------------------------------
     # Sketch the triangular side profile in the x-z plane (y is thickness).
-    # Profile: base leading corner at origin, base trailing corner at +length,
-    # apex at the leading edge full height. A classic swept delta: the tall
-    # edge is the leading edge, sweeping down to the trailing tip.
+    # CENTERED on x = 0 (the 7%c line) so it drops into the centered jig slot.
+    # The TALL edge is at the LEADING edge (-x, into the flow) at full height,
+    # sweeping down to a trailing point at +x. Runs -length/2 .. +length/2.
     xz_plane = comp.xZConstructionPlane
     fin_sketch = fu.sketch_on_plane(comp, xz_plane)
     # NOTE: sketch on xZ plane has local axes (x -> sketch X, z -> sketch Y).
+    x_le = -0.5 * length      # leading edge, tall
+    x_te = 0.5 * length       # trailing edge, point
     fin_pts = [
-        (0.0, 0.0),        # base, leading edge
-        (length, 0.0),     # base, trailing edge
-        (0.0, h),          # apex at the leading edge, full height
+        (x_le, 0.0),       # base, leading edge
+        (x_te, 0.0),       # base, trailing edge
+        (x_le, h),         # apex at the leading edge, full height
     ]
     fin_profile = fu.closed_polyline(fin_sketch, fin_pts)
     # Extrude symmetrically about the x-z plane so the fin thickness t is
@@ -99,12 +101,17 @@ def build_vane(design, params, seat, toe_sign=0.0, seat_to_surface=True,
     # just below z = 0 so it merges with the fin base.
     pad = max(2.0, 0.5 * h)            # how far the flange oversails the fin in x
     flange_sketch = fu.sketch_on_plane(comp, comp.xYConstructionPlane)
-    # Flange drawn in the x-y plane (its own footprint), thickness via extrude.
+    # Flange (paper-airplane footprint), CENTERED on x = 0 to match the fin and
+    # the jig slot. SHARP point at the LE side (-x, into the flow), WIDENING aft
+    # (+x). Runs -length/2 - pad .. +length/2 + pad. FLAT (no curve -- the user
+    # chose a flat, printable vane; the ~0.14 mm surface bend is negligible).
+    x_pt = -0.5 * length - pad         # sharp point, LE side
+    x_wide = 0.5 * length + pad        # wide base, aft side
     flange_half_w = max(t, 0.6 * h)    # half-width of the flange in y (spanwise)
     flange_pts = [
-        (-pad, 0.0),                   # nose of the glue triangle, ahead of LE
-        (length + pad, flange_half_w), # aft, one side
-        (length + pad, -flange_half_w),
+        (x_pt, 0.0),                   # LE point (sharp, into the flow)
+        (x_wide, flange_half_w),       # aft, wide -- one side
+        (x_wide, -flange_half_w),      # aft, wide -- other side
     ]
     flange_profile = fu.closed_polyline(flange_sketch, flange_pts)
     # Extrude DOWN from z = 0 by the flange thickness so its top face is flush
@@ -124,14 +131,9 @@ def build_vane(design, params, seat, toe_sign=0.0, seat_to_surface=True,
     vane_body = fin_body
     vane_body.name = name
 
-    # ---- curve the underside to the skin (gentle, ~396 mm radius) ------------
-    # The sagitta is ~0.1 mm at 7%c, so this is a refinement, not the main act;
-    # we cut a shallow cylinder out of the flange underside so it seats on the
-    # convex skin without rocking. Skip when the radius is effectively flat.
-    if seat_to_surface and seat["radius_mm"] < 5.0e3:
-        _curve_underside(comp, vane_body, length, pad, seat["radius_mm"], flange_t)
-
     # ---- seat the vane to the surface: tilt, then toe ------------------------
+    # FLAT vane (no base curve, per the user's choice -- easier to print). Only
+    # the tilt + toe are applied so the vane sits at the local surface angle.
     if seat_to_surface:
         _apply_seat(comp, vane_body, seat["tilt_deg"], toe_deg)
     elif toe_deg:
@@ -159,36 +161,6 @@ def build_pair(design, params, seat, name="VG Pair", seat_to_surface=True):
 # ===========================================================================
 #  Internal seating helpers
 # ===========================================================================
-
-def _curve_underside(comp, body, length, pad, radius_mm, flange_t):
-    """Subtract a large cylinder from the flange underside to match skin curve.
-
-    The cylinder axis runs spanwise (y), centered one radius BELOW the flange
-    base, so its top surface is the wing's convex arc. Cutting it away leaves
-    the flange bottom as a matching concave arc that nests on the skin. With
-    radius ~396 mm and a ~19 mm footprint the removed sagitta is ~0.1 mm.
-    """
-    # Build the cutting cylinder as a temporary body via a sketched circle on
-    # the x-z plane, extruded spanwise well past the flange width.
-    sk = fu.sketch_on_plane(comp, comp.xZConstructionPlane)
-    circles = sk.sketchCurves.sketchCircles
-    # Center: chordwise mid-footprint, radius below the flange underside.
-    cx = 0.5 * length
-    cz = -flange_t - radius_mm  # one radius below the glue face
-    center = adsk.core.Point3D.create(cx * config.MM, cz * config.MM, 0.0)
-    circles.addByCenterRadius(center, radius_mm * config.MM)
-    circ_profile = sk.profiles.item(0)
-    # Extrude the disk spanwise, symmetric, wider than the flange.
-    span = 4.0 * max(pad, length)
-    cyl_ext = fu.extrude(comp, circ_profile, span, symmetric=True)
-    cyl_body = cyl_ext.bodies.item(0)
-    # The cylinder's arc sits just under the flange; cutting it removes only
-    # the thin sliver where the flat flange would otherwise overhang the arc.
-    fu.combine(
-        comp, body, [cyl_body],
-        adsk.fusion.FeatureOperations.CutFeatureOperation,
-    )
-
 
 def _apply_seat(comp, body, tilt_deg, toe_deg):
     """Tilt the vane to the local skin slope, then yaw it by the toe angle.

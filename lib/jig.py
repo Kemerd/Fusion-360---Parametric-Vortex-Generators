@@ -41,8 +41,19 @@ from . import fusion_util as fu
 # they set how much material surrounds the pockets and the hook.
 _TILE_MARGIN = 8.0       # material ahead of / behind the pocket band (chordwise)
 _TILE_SIDE_MARGIN = 6.0  # material outboard of the end pockets (spanwise)
-_TILE_THICK = 4.0        # tile slab thickness
+_TILE_THICK = 4.0        # legacy slab thickness (kept for the fit ladder math)
 _POCKET_CLEAR = 0.15     # pocket-to-vane clearance per side (slip fit)
+
+# Jig block sizing (mm / fraction). The block is the wing foil's bounding box
+# grown by WRAP_CLEAR on every side (top, bottom, and ahead of the LE), going
+# back WRAP_DEPTH_FRAC of the chord; the wing foil is then subtracted, leaving a
+# square block with a foil-shaped C-channel that hooks over the leading edge.
+WRAP_CLEAR = 10.0        # clearance around the foil (above, below, ahead of LE)
+WRAP_DEPTH_FRAC = 0.25   # how far back the block reaches (fraction of chord)
+
+# Vane-slot cutter span (kept generous so the straight-down cut always passes
+# fully through the block regardless of local thickness).
+SHELL_WALL = 16.0
 
 
 class JigPlan:
@@ -202,44 +213,34 @@ def build_jig(design, params, seat, surf, jig_plan, name="VG Jig"):
     vane_h = params["vane_height_mm"]
     vane_t = params["vane_thick_mm"]
     spacing = params["jig_spacing_mm"]
-    le_hook = params["le_hook_mm"]
     toe = params["vane_toe_deg"]
+    chord = params["chord_len_mm"]
+    x_frac = params["chord_pos_pct"] / 100.0
 
     occ = fu.new_component(design, name)
     comp = occ.component
 
-    # ---- the slab ------------------------------------------------------------
-    # Tile laid out in the x (chordwise) - y (spanwise) plane, thickness in +z.
     half_w = 0.5 * jig_plan.tile_wid_mm
-    slab_pts = [
-        (-_TILE_MARGIN - le_hook, -half_w),
-        (vane_len + _TILE_MARGIN, -half_w),
-        (vane_len + _TILE_MARGIN, half_w),
-        (-_TILE_MARGIN - le_hook, half_w),
-    ]
-    slab_sketch = fu.sketch_on_plane(comp, comp.xYConstructionPlane)
-    slab_profile = fu.closed_polyline(slab_sketch, slab_pts)
-    slab_ext = fu.extrude(comp, slab_profile, _TILE_THICK)
-    tile_body = slab_ext.bodies.item(0)
-    tile_body.name = name
 
-    # ---- vane pockets --------------------------------------------------------
-    # Each pocket is a thin slot the vane fin slips into, oriented at the toe
-    # angle. Single-vane mode cuts one centered pocket; otherwise a pocket per
-    # vane across the placed pairs.
+    # ---- the jig block: box minus wing foil ----------------------------------
+    # A square block sized to the foil's bounding box + 10 mm clearance, reaching
+    # back 25% of the chord, with the wing foil subtracted -- leaving a block
+    # with a foil-shaped C-channel that hooks over the leading edge. Frame:
+    # x = chordwise (+x aft), z = up; station-centered so the 7%c line is x = 0.
+    tile_body = _build_wrap_shell(comp, surf, params, half_w, x_frac, chord, name)
+
+    # ---- vane slots cut straight down at the 7%c line -------------------------
+    # The 7%c line is x = 0 (station-centered). Each vane slot is the flange
+    # triangle, CENTERED on x = 0, toed, and cut straight DOWN through the block
+    # so the vanes drop in from the top exactly on the 7% chord line.
+    flange_half_w = max(vane_t, 0.6 * vane_h)
+    flange_pad = max(2.0, 0.5 * vane_h)
     pocket_centers = _pocket_layout(jig_plan, spacing)
     for y_center, toe_sign in pocket_centers:
-        _cut_pocket(comp, tile_body, vane_len, vane_h, vane_t, y_center,
-                    toe * toe_sign)
-
-    # ---- leading-edge hook ---------------------------------------------------
-    # A lip hanging off the forward edge that wraps the wing nose. Built from
-    # the airfoil's actual nose so it registers on this section's LE.
-    _build_le_hook(comp, tile_body, surf, params, le_hook, half_w)
+        _cut_vane_slot(comp, tile_body, vane_len, flange_half_w, flange_pad,
+                       y_center, toe * toe_sign)
 
     # ---- side registration keys ---------------------------------------------
-    # Male tab on +y end, matching female notch on -y end, so tiles butt and
-    # keep spacing continuous when leapfrogged down the span.
     _build_side_keys(comp, tile_body, vane_len, half_w)
 
     # ---- dovetail split (rung 4 only) ---------------------------------------
@@ -271,34 +272,47 @@ def _pocket_layout(jig_plan, spacing):
     return centers
 
 
-def _cut_pocket(comp, tile_body, vane_len, vane_h, vane_t, y_center, toe_deg):
-    """Cut one toe-angled vane slot into the tile top.
+def _cut_vane_slot(comp, tile_body, vane_len, flange_half_w, flange_pad,
+                   y_center, toe_deg):
+    """Cut one toed vane slot STRAIGHT DOWN through the shell top.
 
-    The pocket is a rectangle (vane footprint length x fin thickness + clearance)
-    cut part-way down from the top face, rotated by the toe angle about z so the
-    vane drops in pre-toed. Depth is a fraction of the fin height -- enough to
-    hold the vane upright while the glue cures, not all the way through.
+    The slot footprint is the vane's bottom flange triangle (paper-airplane:
+    WIDE at the LE, tapering to a POINT aft) -- that is exactly the cross-section
+    the vane presents when you push it down into the jig. We sketch that triangle
+    on the z = 0 chord plane (centered at the 7%c station, toed about its own
+    center) and extrude it as a tall cutter spanning the whole shell height, then
+    subtract -- so the slot passes cleanly through the conformal top, giving a
+    through-slot the vane drops into from above.
+
+    Cutting straight down (global -z), not normal to the curved skin, is correct:
+    the vane stands vertically off the wing, so its slot is vertical too.
     """
-    w = vane_t + 2.0 * _POCKET_CLEAR          # slot width (spanwise)
-    L = vane_len + 2.0 * _POCKET_CLEAR         # slot length (chordwise)
-    depth = min(0.6 * vane_h, _TILE_THICK - 0.8)  # keep a floor under the slot
+    hw = flange_half_w + _POCKET_CLEAR
 
+    # Flange triangle on the chord plane (z = 0), MATCHING the vane flange and
+    # CENTERED on the 7%c line (x = 0): POINT at the LE side (-x, into the flow),
+    # WIDENING toward the aft side (+x). The vane footprint is vane_len long, so
+    # it runs from -vane_len/2 (point) to +vane_len/2 (wide), centered on x = 0.
+    x_pt = -0.5 * vane_len - flange_pad     # sharp point, LE side
+    x_wide = 0.5 * vane_len + flange_pad    # wide base, aft side
     sk = fu.sketch_on_plane(comp, comp.xYConstructionPlane)
-    pts = [
-        (0.0, y_center - 0.5 * w),
-        (L, y_center - 0.5 * w),
-        (L, y_center + 0.5 * w),
-        (0.0, y_center + 0.5 * w),
+    tri_pts = [
+        (x_pt, y_center),
+        (x_wide, y_center - hw),
+        (x_wide, y_center + hw),
     ]
-    prof = fu.closed_polyline(sk, pts)
-    cut = fu.extrude(comp, prof, depth,
-                     operation=adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
-    tool = cut.bodies.item(0)
+    prof = fu.closed_polyline(sk, tri_pts)
 
-    # Toe the slot about its own center (z axis through (L/2, y_center)).
+    # Tall cutter spanning well above and below the block so the straight-down
+    # cut always passes fully through. Symmetric about z = 0.
+    cut_h = 8.0 * SHELL_WALL + 200.0
+    cutter = fu.extrude(comp, prof, cut_h, symmetric=True,
+                        operation=adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    tool = cutter.bodies.item(0)
+
+    # Toe the cutter about a vertical axis through the 7%c line (x = 0).
     if toe_deg:
-        origin = adsk.core.Point3D.create(
-            0.5 * L * config.MM, y_center * config.MM, 0.0)
+        origin = adsk.core.Point3D.create(0.0, y_center * config.MM, 0.0)
         z_axis = adsk.core.Vector3D.create(0.0, 0.0, 1.0)
         rot = adsk.core.Matrix3D.create()
         rot.setToRotation(math.radians(toe_deg), z_axis, origin)
@@ -308,33 +322,75 @@ def _cut_pocket(comp, tile_body, vane_len, vane_h, vane_t, y_center, toe_deg):
                adsk.fusion.FeatureOperations.CutFeatureOperation)
 
 
-def _build_le_hook(comp, tile_body, surf, params, le_hook, half_w):
-    """Add the leading-edge hook lip that wraps the wing nose.
+def _build_wrap_shell(comp, surf, params, half_w, x_frac, chord, name):
+    """Build the jig block: a box minus the wing foil. Return its body.
 
-    Built as a downward lip at the forward tile edge whose inner face follows
-    the airfoil nose curve. We sample the airfoil's upper+lower surface near
-    the LE, scale to chord, and sweep that nose profile across the tile width
-    to form a registration hook the user hangs over the wing's leading edge.
+    EXACT RECIPE (the simple, correct one):
+      1. Take the full wing foil section.
+      2. Box HEIGHT: top = foil's highest z + CLEAR, bottom = foil's lowest z -
+         CLEAR (so the box is foil_height + 2*CLEAR tall, centered on the foil).
+      3. Box FORE-AFT: front edge = foil's least x (the leading edge) - CLEAR
+         (hugs CLEAR mm ahead of the nose); depth = WRAP_DEPTH_FRAC of the chord
+         back from there (default 25% chord).
+      4. SUBTRACT the wing foil solid from the box.
+    What remains is a square block with a foil-shaped C-channel cut into its
+    front -- you hook it over the leading edge and it grips the nose. The VG
+    slots are cut into the top afterwards (build_jig).
+
+    Frame: x = chordwise (+x aft), z = up, station-centered so the 7%c station
+    sits at x = 0, z = 0 (shared with the vane + example wing).
     """
-    chord = params["chord_len_mm"]
-    # Forward edge x of the tile (where the hook attaches).
-    x_edge = -_TILE_MARGIN
+    from . import airfoils
 
-    # Profile of the hook in the x-z plane: a simple downturned lip reaching
-    # le_hook deep. (A full airfoil-nose contour is a refinement; the lip plus
-    # the seated underside already locate the tile chordwise.)
-    sk = fu.sketch_on_plane(comp, comp.xZConstructionPlane)
-    lip_pts = [
-        (x_edge, 0.0),
-        (x_edge, -le_hook),
-        (x_edge - 3.0, -le_hook),
-        (x_edge - 3.0, _TILE_THICK),
-        (x_edge, _TILE_THICK),
-    ]
-    prof = fu.closed_polyline(sk, lip_pts)
-    lip = fu.extrude(comp, prof, 2.0 * half_w, symmetric=True)
-    fu.combine(comp, tile_body, [lip.bodies.item(0)],
-               adsk.fusion.FeatureOperations.JoinFeatureOperation)
+    af = airfoils.get(params["airfoil"])
+    x_station_mm = x_frac * chord
+    y_skin_station = surf.y(x_frac) * chord
+
+    # Full foil loop in station-centered mm (x chordwise, z up).
+    full_loop = [((x * chord - x_station_mm), (y * chord - y_skin_station))
+                 for (x, y) in _full_airfoil_loop(af)]
+    xs = [p[0] for p in full_loop]
+    zs = [p[1] for p in full_loop]
+
+    # Foil extremes.
+    x_le = min(xs)                      # least x = the leading edge
+    z_top = max(zs)                     # highest point of the foil
+    z_bot = min(zs)                     # lowest point of the foil
+
+    # Box per the recipe.
+    bx0 = x_le - WRAP_CLEAR                       # CLEAR mm ahead of the LE
+    bx1 = bx0 + WRAP_DEPTH_FRAC * chord           # back 25% of the chord
+    bz0 = z_bot - WRAP_CLEAR                      # CLEAR below the lowest point
+    bz1 = z_top + WRAP_CLEAR                      # CLEAR above the highest point
+    box_pts = [(bx0, bz0), (bx1, bz0), (bx1, bz1), (bx0, bz1)]
+
+    sk_b = fu.sketch_on_plane(comp, comp.xZConstructionPlane)
+    prof_b = fu.closed_polyline(sk_b, box_pts)
+    span = 2.0 * half_w
+    box = fu.extrude(comp, prof_b, span, symmetric=True)
+    cap_body = box.bodies.item(0)
+    cap_body.name = name
+
+    # Solid WING tool (full section), extruded wider than the box so the cut is
+    # clean across the whole span.
+    sk_w = fu.sketch_on_plane(comp, comp.xZConstructionPlane)
+    prof_w = fu.closed_polyline(sk_w, full_loop)
+    wing = fu.extrude(comp, prof_w, span + 20.0, symmetric=True,
+                      operation=adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+    wing_tool = wing.bodies.item(0)
+
+    # Subtract the foil from the box -> block with a foil-shaped C-channel.
+    fu.combine(comp, cap_body, [wing_tool],
+               adsk.fusion.FeatureOperations.CutFeatureOperation)
+    return cap_body
+
+
+def _full_airfoil_loop(af):
+    """Full closed airfoil loop (upper TE->LE then lower LE->TE) for a solid."""
+    # Upper reversed (TE->LE), then lower LE->TE skipping the duplicate nose.
+    return list(reversed(af.upper)) + af.lower[1:]
+
+
 
 
 def _build_side_keys(comp, tile_body, vane_len, half_w):
@@ -342,11 +398,14 @@ def _build_side_keys(comp, tile_body, vane_len, half_w):
 
     The tab and notch are the same nominal size; the notch carries a small
     clearance so adjacent tiles seat without forcing. Keeping them on opposite
-    ends lets you chain identical tiles down the span.
+    ends lets you chain identical tiles down the span. Both are extruded as a
+    TALL symmetric band about z = 0 so they fully intersect the conformal shell
+    wherever it is; the boolean clips them to the actual shell body.
     """
     key_w = 8.0
     key_d = 4.0
     x_mid = 0.5 * vane_len
+    tall = 4.0 * SHELL_WALL + 40.0   # spans the whole shell vertically
 
     # Male tab on +y edge.
     sk1 = fu.sketch_on_plane(comp, comp.xYConstructionPlane)
@@ -356,7 +415,7 @@ def _build_side_keys(comp, tile_body, vane_len, half_w):
         (x_mid + 0.5 * key_w, half_w + key_d),
         (x_mid - 0.5 * key_w, half_w + key_d),
     ]
-    tab = fu.extrude(comp, fu.closed_polyline(sk1, tab_pts), _TILE_THICK)
+    tab = fu.extrude(comp, fu.closed_polyline(sk1, tab_pts), tall, symmetric=True)
     fu.combine(comp, tile_body, [tab.bodies.item(0)],
                adsk.fusion.FeatureOperations.JoinFeatureOperation)
 
@@ -369,7 +428,8 @@ def _build_side_keys(comp, tile_body, vane_len, half_w):
         (x_mid + 0.5 * key_w + clr, -half_w + key_d + clr),
         (x_mid - 0.5 * key_w - clr, -half_w + key_d + clr),
     ]
-    notch = fu.extrude(comp, fu.closed_polyline(sk2, notch_pts), _TILE_THICK,
+    notch = fu.extrude(comp, fu.closed_polyline(sk2, notch_pts), tall,
+                       symmetric=True,
                        operation=adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
     fu.combine(comp, tile_body, [notch.bodies.item(0)],
                adsk.fusion.FeatureOperations.CutFeatureOperation)
@@ -381,29 +441,25 @@ def _split_dovetail(comp, tile_body, jig_plan, params):
     The split plane is spanwise mid-tile (y = 0). A dovetail key profile is
     swept along the seam so the two halves mechanically interlock (glue
     optional). The dovetail clearance is a user parameter tuned for ABS fit.
-    Implementation: cut the tile into two bodies at y=0, leaving a trapezoidal
-    (dovetail) interface between them.
+    The trapezoid spans a tall band about z = 0 so it keys the whole shell.
     """
     clr = params["dovetail_clear_mm"]
-    # A dovetail seam is cut by removing a thin trapezoidal slot down the seam
-    # on one half and adding its complement to the other. For a robust first
-    # cut we split at y = 0 with a dovetail-shaped parting tool: the tool is a
-    # trapezoid (wider at the bottom) extruded chordwise, so each half gets a
-    # mating angled face. Clearance widens the female side.
+    # A dovetail seam is cut by removing a thin trapezoidal slot down the seam.
+    # The trapezoid is wide at the top (z = +band) and narrow at the bottom
+    # (z = -band) so the two halves mechanically key together; the band is tall
+    # enough to cross the whole conformal shell.
     dt_w = 10.0          # dovetail mouth width
-    dt_neck = 6.0        # dovetail neck (narrower top -> interlock)
-    dt_h = _TILE_THICK
+    dt_neck = 6.0        # dovetail neck (narrower -> interlock)
+    band = 2.0 * SHELL_WALL + 20.0
 
     sk = fu.sketch_on_plane(comp, comp.yZConstructionPlane)
-    # Trapezoid in the y-z plane (y across seam, z through thickness), centered
-    # on y = 0: wide at z=0 (bottom), narrow at z=thick (top) -> a dovetail.
     half_mouth = 0.5 * dt_w + clr
     half_neck = 0.5 * dt_neck + clr
     dt_pts = [
-        (-half_mouth, 0.0),
-        (half_mouth, 0.0),
-        (half_neck, dt_h),
-        (-half_neck, dt_h),
+        (-half_mouth, band),
+        (half_mouth, band),
+        (half_neck, -band),
+        (-half_neck, -band),
     ]
     prof = fu.closed_polyline(sk, dt_pts)
     # Sweep the dovetail tool the full chordwise length of the tile.
