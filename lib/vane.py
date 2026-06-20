@@ -73,57 +73,58 @@ def build_vane(design, params, seat, toe_sign=0.0, seat_to_surface=True,
     occ = fu.new_component(design, name)
     comp = occ.component
 
-    # ---- the delta fin --------------------------------------------------------
-    # Sketch the triangular side profile in the x-z plane (y is thickness).
-    # CENTERED on x = 0 (the 7%c line) so it drops into the centered jig slot.
-    # The TALL edge is at the LEADING edge (-x, into the flow) at full height,
-    # sweeping down to a trailing point at +x. Runs -length/2 .. +length/2.
-    xz_plane = comp.xZConstructionPlane
-    fin_sketch = fu.sketch_on_plane(comp, xz_plane)
-    # NOTE: sketch on xZ plane has local axes (x -> sketch X, z -> sketch Y).
-    x_le = -0.5 * length      # leading edge, tall
-    x_te = 0.5 * length       # trailing edge, point
+    # ---- DART geometry (paper-airplane VG, per the user's step1-4 build) ------
+    # A central vertical FIN plus two flat triangular WINGS (the flange) that
+    # spread from the fin's base centerline out to each side, all converging to a
+    # single SHARP NOSE point at the front. From the top it reads as an arrow.
+    #
+    # Frame (centered on x = 0, the 7%c line):
+    #   NOSE  at x = x_nose (-x, the leading edge, into the flow)
+    #   BACK  at x = x_back (+x); the fin's tall vertical edge lives here
+    #   z = up (fin height), y = spanwise (fin thickness / wing span)
+    x_nose = -0.5 * length             # sharp nose, leading edge
+    x_back = 0.5 * length              # aft end (tall fin edge + wide wings)
+    fin_half_t = 0.5 * t               # fin half-thickness
+    wing_span = h                      # each flat wing reaches `h` out at the back
+
+    # ---- the central fin (side profile in x-z) -------------------------------
+    # Sharp & low at the nose (x_nose, 0), rising to the tall vertical edge at
+    # the back. The fin height is NEGATED (-h) so that, together with the wing's
+    # negated z (see _foil_loop_mm / _build_wing), the fin points UP away from
+    # the now-curved-side-up wing. Base on z = 0 (the 7%c skin line, invariant).
+    fin_sketch = fu.sketch_on_plane(comp, comp.xZConstructionPlane)
+    # NOTE: xZ sketch local axes: x -> sketch X, z -> sketch Y.
     fin_pts = [
-        (x_le, 0.0),       # base, leading edge
-        (x_te, 0.0),       # base, trailing edge
-        (x_le, h),         # apex at the leading edge, full height
+        (x_nose, 0.0),     # sharp nose at the LE (z = 0)
+        (x_back, 0.0),     # aft base corner
+        (x_back, -h),      # tall vertical edge at the back (negated z, points up)
     ]
     fin_profile = fu.closed_polyline(fin_sketch, fin_pts)
-    # Extrude symmetrically about the x-z plane so the fin thickness t is
-    # centered on y = 0 (keeps the pair geometry symmetric).
     fin_ext = fu.extrude(comp, fin_profile, t, symmetric=True)
     fin_body = fin_ext.bodies.item(0)
     fin_body.name = "fin"
 
-    # ---- the thin bottom flange (glue tab) -----------------------------------
-    # A wider, flatter triangle under the fin. It extends a little beyond the
-    # fin footprint on each side (in x) so there is real glue area, and it sits
-    # just below z = 0 so it merges with the fin base.
-    pad = max(2.0, 0.5 * h)            # how far the flange oversails the fin in x
+    # ---- the flat flange WINGS (top footprint in x-y) ------------------------
+    # An arrow/dart outline: the single sharp NOSE at (x_nose, 0), sweeping back
+    # to the full span at the back -- (x_back, +wing_span) and (x_back, -wing_span).
+    # This is one triangle whose tip is the shared nose, so the fin's point and
+    # the wings' point coincide exactly. Thin, extruded UP (+flange_t) so it ends
+    # up on the wing-contact side of the negated-z frame.
     flange_sketch = fu.sketch_on_plane(comp, comp.xYConstructionPlane)
-    # Flange (paper-airplane footprint), CENTERED on x = 0 to match the fin and
-    # the jig slot. SHARP point at the LE side (-x, into the flow), WIDENING aft
-    # (+x). Runs -length/2 - pad .. +length/2 + pad. FLAT (no curve -- the user
-    # chose a flat, printable vane; the ~0.14 mm surface bend is negligible).
-    x_pt = -0.5 * length - pad         # sharp point, LE side
-    x_wide = 0.5 * length + pad        # wide base, aft side
-    flange_half_w = max(t, 0.6 * h)    # half-width of the flange in y (spanwise)
     flange_pts = [
-        (x_pt, 0.0),                   # LE point (sharp, into the flow)
-        (x_wide, flange_half_w),       # aft, wide -- one side
-        (x_wide, -flange_half_w),      # aft, wide -- other side
+        (x_nose, 0.0),                 # shared sharp nose (tips coincide)
+        (x_back, wing_span),           # back, one wing tip
+        (x_back, -wing_span),          # back, other wing tip
     ]
     flange_profile = fu.closed_polyline(flange_sketch, flange_pts)
-    # Extrude DOWN from z = 0 by the flange thickness so its top face is flush
-    # with the fin base (z = 0) and the glue face is the underside.
     flange_ext = fu.extrude(
-        comp, flange_profile, -flange_t,
+        comp, flange_profile, flange_t,
         operation=adsk.fusion.FeatureOperations.NewBodyFeatureOperation,
     )
     flange_body = flange_ext.bodies.item(0)
     flange_body.name = "flange"
 
-    # Weld fin + flange into one vane body.
+    # Weld fin + wings into one dart body.
     fu.combine(
         comp, fin_body, [flange_body],
         adsk.fusion.FeatureOperations.JoinFeatureOperation,
@@ -131,13 +132,13 @@ def build_vane(design, params, seat, toe_sign=0.0, seat_to_surface=True,
     vane_body = fin_body
     vane_body.name = name
 
-    # ---- seat the vane to the surface: tilt, then toe ------------------------
-    # FLAT vane (no base curve, per the user's choice -- easier to print). Only
-    # the tilt + toe are applied so the vane sits at the local surface angle.
-    if seat_to_surface:
-        _apply_seat(comp, vane_body, seat["tilt_deg"], toe_deg)
-    elif toe_deg:
-        # Parts-at-origin still honours toe so a printed pair is handed.
+    # ---- orient: flange flat, fin up, only TOE differs -----------------------
+    # All vanes sit identically -- flange flat on z = 0, fin pointing straight up
+    # -- with ONLY the toe angle distinguishing them (mirrored L/R for the
+    # counter-rotating pair). No surface tilt, so they are all uniform and clean
+    # (the user explicitly wanted no random leaning, and the slot is cut straight
+    # down to receive a vertical vane).
+    if toe_deg:
         _apply_seat(comp, vane_body, 0.0, toe_deg)
 
     return vane_body

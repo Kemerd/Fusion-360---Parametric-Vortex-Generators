@@ -132,10 +132,30 @@ def _build_assembly(design, params, seat, surf, jig_plan):
         _translate_body(design, vane_body, 0.0, 0.0, y_center)
         n += 1
 
+    # ---- a print-ready VG, parked off to the side ----------------------------
+    # A single FLAT vane (no seat tilt/curve) laid flange-down on z = 0, parked
+    # well clear of the wing so it sits ready to export / arrange on the plate.
+    _build_print_vane(design, params, seat, span)
+
     return (
         f"Example assembly: wing ({chord:.0f} mm chord x {span:.0f} mm span) "
-        f"+ jig + {n} vanes resting in their slots."
+        f"+ jig + {n} vanes in their slots + 1 print-ready vane off to the side."
     )
+
+
+def _build_print_vane(design, params, seat, span_mm):
+    """Build one FLAT vane parked off to the side, oriented for printing.
+
+    seat_to_surface=False keeps it flat (no tilt/curve) and flange-down on the
+    z = 0 plane -- exactly how it should sit on a print bed. It is parked a wing
+    span away in -x and out in +y so it never overlaps the assembly.
+    """
+    vane = vane_mod.build_vane(design, params, seat, toe_sign=0.0,
+                               seat_to_surface=False, name="VG Vane (print)")
+    chord = params["chord_len_mm"]
+    park_x = -0.6 * chord                 # well ahead of the wing nose
+    park_y = 0.5 * span_mm + 60.0         # clear of the spanwise extent
+    _translate_body(design, vane, park_x, 0.0, park_y)
 
 
 # ===========================================================================
@@ -167,11 +187,14 @@ def _build_wing(design, surf, params, chord_mm, span_mm):
     x_station_mm = x_frac * chord_mm
     y_skin_station = surf.y(x_frac) * chord_mm
 
-    # Profile in the x-z plane, station-centered to match the jig carve frame.
+    # Profile in the x-z plane, station-centered. z is NEGATED so the curved
+    # suction surface faces UP (right side up) -- the same flip the jig applies
+    # in _foil_loop_mm, so the wing and the jig stay matched. x is untouched so
+    # the 7%c / chord-% measurement is unaffected.
     pts = []
     for (xc, yc) in loop:
         x_mm = xc * chord_mm - x_station_mm
-        z_mm = yc * chord_mm - y_skin_station
+        z_mm = -(yc * chord_mm - y_skin_station)
         pts.append((x_mm, z_mm))
 
     sk = fu.sketch_on_plane(comp, comp.xZConstructionPlane)

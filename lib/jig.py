@@ -82,17 +82,16 @@ class JigPlan:
 def _tile_span_for_pairs(pairs, spacing_mm, vane_len_mm):
     """Spanwise width a tile needs to hold `pairs` counter-rotating pairs.
 
-    The two vanes of a pair sit half a spacing apart; pairs are one spacing
-    apart center-to-center. So N pairs occupy (N-1)*spacing between pair
-    centers plus the half-spacing split within the end pairs, plus the side
-    margins. Spanwise width is what the bed limits (the tile is long across
-    the span, short chordwise).
+    SEAMLESS-TILING WIDTH: the tile width is EXACTLY N * pitch (the pair
+    spacing). Pair centers sit at half-pitch from each edge -- (i + 0.5)*pitch
+    for i = 0..N-1 -- so when you butt two tiles, the last pair of one and the
+    first pair of the next are exactly one pitch apart. The 70 mm rhythm
+    continues unbroken across every seam (the edge margins are each half a pitch,
+    i.e. the "35 mm left + 35 mm right" that adds up to one full 70 mm gap).
     """
     if pairs <= 0:
         return 0.0
-    # Centers of the outermost pair vanes span (N-1)*spacing + half-spacing.
-    vane_spread = (pairs - 1) * spacing_mm + 0.5 * spacing_mm
-    return vane_spread + 2.0 * _TILE_SIDE_MARGIN
+    return pairs * spacing_mm
 
 
 def _single_vane_span(vane_thick_mm):
@@ -227,18 +226,19 @@ def build_jig(design, params, seat, surf, jig_plan, name="VG Jig"):
     # back 25% of the chord, with the wing foil subtracted -- leaving a block
     # with a foil-shaped C-channel that hooks over the leading edge. Frame:
     # x = chordwise (+x aft), z = up; station-centered so the 7%c line is x = 0.
-    tile_body = _build_wrap_shell(comp, surf, params, half_w, x_frac, chord, name)
+    tile_body, box_top, box_bottom = _build_wrap_shell(
+        comp, surf, params, half_w, x_frac, chord, name)
 
-    # ---- vane slots cut straight down at the 7%c line -------------------------
-    # The 7%c line is x = 0 (station-centered). Each vane slot is the flange
-    # triangle, CENTERED on x = 0, toed, and cut straight DOWN through the block
-    # so the vanes drop in from the top exactly on the 7% chord line.
-    flange_half_w = max(vane_t, 0.6 * vane_h)
-    flange_pad = max(2.0, 0.5 * vane_h)
+    # ---- vane slots cut down to 50% of the box at the 7%c line ----------------
+    # The 7%c line is x = 0 (station-centered). Each slot is the DART outline
+    # (sharp nose forward, wings to +/- wing_span aft), CENTERED on x = 0, toed,
+    # and cut DOWN only to the box mid-height (no cutout in the bottom of the
+    # jig). wing_span matches the vane's flange wings (= fin height h).
+    wing_span = vane_h
     pocket_centers = _pocket_layout(jig_plan, spacing)
     for y_center, toe_sign in pocket_centers:
-        _cut_vane_slot(comp, tile_body, vane_len, flange_half_w, flange_pad,
-                       y_center, toe * toe_sign)
+        _cut_vane_slot(comp, tile_body, vane_len, wing_span,
+                       y_center, toe * toe_sign, box_top, box_bottom)
 
     # ---- side registration keys ---------------------------------------------
     _build_side_keys(comp, tile_body, vane_len, half_w)
@@ -272,43 +272,53 @@ def _pocket_layout(jig_plan, spacing):
     return centers
 
 
-def _cut_vane_slot(comp, tile_body, vane_len, flange_half_w, flange_pad,
-                   y_center, toe_deg):
-    """Cut one toed vane slot STRAIGHT DOWN through the shell top.
+def _cut_vane_slot(comp, tile_body, vane_len, wing_span, y_center, toe_deg,
+                   box_top, box_bottom):
+    """Cut one toed vane slot in from the VANE-SIDE face to 50% of box height.
 
-    The slot footprint is the vane's bottom flange triangle (paper-airplane:
-    WIDE at the LE, tapering to a POINT aft) -- that is exactly the cross-section
-    the vane presents when you push it down into the jig. We sketch that triangle
-    on the z = 0 chord plane (centered at the 7%c station, toed about its own
-    center) and extrude it as a tall cutter spanning the whole shell height, then
-    subtract -- so the slot passes cleanly through the conformal top, giving a
-    through-slot the vane drops into from above.
-
-    Cutting straight down (global -z), not normal to the curved skin, is correct:
-    the vane stands vertically off the wing, so its slot is vertical too.
+    The slot footprint is the DART's top outline (the flange wings): a single
+    sharp NOSE at the LE side (-x), sweeping back to the full wing span at the
+    aft side (+x). Centered on the 7%c line (x = 0) and toed about that vertical
+    axis. The vanes sit on the wing's UPPER surface, which after the right-side-up
+    flip is the box face NEAREST z = 0; we cut IN from that face only to the box
+    mid-height, so the slot never breaks through the far (bottom) side.
     """
-    hw = flange_half_w + _POCKET_CLEAR
+    hw = wing_span + _POCKET_CLEAR          # wing tip half-span + clearance
 
-    # Flange triangle on the chord plane (z = 0), MATCHING the vane flange and
-    # CENTERED on the 7%c line (x = 0): POINT at the LE side (-x, into the flow),
-    # WIDENING toward the aft side (+x). The vane footprint is vane_len long, so
-    # it runs from -vane_len/2 (point) to +vane_len/2 (wide), centered on x = 0.
-    x_pt = -0.5 * vane_len - flange_pad     # sharp point, LE side
-    x_wide = 0.5 * vane_len + flange_pad    # wide base, aft side
+    # Dart outline on the chord plane (z = 0), CENTERED on x = 0: sharp NOSE at
+    # -vane_len/2 (LE side), widening to the wing tips at +vane_len/2 (aft).
+    x_nose = -0.5 * vane_len - _POCKET_CLEAR
+    x_back = 0.5 * vane_len + _POCKET_CLEAR
     sk = fu.sketch_on_plane(comp, comp.xYConstructionPlane)
     tri_pts = [
-        (x_pt, y_center),
-        (x_wide, y_center - hw),
-        (x_wide, y_center + hw),
+        (x_nose, y_center),                 # sharp nose (LE)
+        (x_back, y_center - hw),            # aft, one wing tip
+        (x_back, y_center + hw),            # aft, other wing tip
     ]
     prof = fu.closed_polyline(sk, tri_pts)
 
-    # Tall cutter spanning well above and below the block so the straight-down
-    # cut always passes fully through. Symmetric about z = 0.
-    cut_h = 8.0 * SHELL_WALL + 200.0
-    cutter = fu.extrude(comp, prof, cut_h, symmetric=True,
+    # The vane side is the box face nearest z = 0 (the vanes occupy a band around
+    # z = 0). Cut IN from that face to the box mid-height (50%), so the far side
+    # stays solid (no through-cut).
+    z_mid = 0.5 * (box_top + box_bottom)
+    over = 5.0
+    if abs(box_bottom) <= abs(box_top):
+        # box_bottom is the vane-side face: cut UP from below it to z_mid.
+        cut_from = box_bottom - over
+        cut_depth = z_mid - cut_from        # positive, extrude up
+        z_start = cut_from
+    else:
+        # box_top is the vane-side face: cut DOWN from above it to z_mid.
+        cut_from = box_top + over
+        cut_depth = cut_from - z_mid        # positive height
+        z_start = z_mid
+    cutter = fu.extrude(comp, prof, cut_depth,
                         operation=adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
     tool = cutter.bodies.item(0)
+    # Move so the cutter spans [z_start, z_start + cut_depth].
+    shift = adsk.core.Matrix3D.create()
+    shift.translation = adsk.core.Vector3D.create(0.0, 0.0, z_start * config.MM)
+    fu.move_body(comp, tool, shift)
 
     # Toe the cutter about a vertical axis through the 7%c line (x = 0).
     if toe_deg:
@@ -346,16 +356,18 @@ def _build_wrap_shell(comp, surf, params, half_w, x_frac, chord, name):
     x_station_mm = x_frac * chord
     y_skin_station = surf.y(x_frac) * chord
 
-    # Full foil loop in station-centered mm (x chordwise, z up).
-    full_loop = [((x * chord - x_station_mm), (y * chord - y_skin_station))
-                 for (x, y) in _full_airfoil_loop(af)]
+    # Full foil loop in station-centered mm. z = up, with the UPPER surface on
+    # top (positive y/c -> +z). The vanes sit fin-up on the upper surface, so the
+    # box top (where the slots are cut) must be on the UPPER-surface side -- which
+    # it is, because z_top below is the upper skin.
+    full_loop = _foil_loop_mm(af, x_station_mm, y_skin_station, chord)
     xs = [p[0] for p in full_loop]
     zs = [p[1] for p in full_loop]
 
     # Foil extremes.
     x_le = min(xs)                      # least x = the leading edge
-    z_top = max(zs)                     # highest point of the foil
-    z_bot = min(zs)                     # lowest point of the foil
+    z_top = max(zs)                     # highest point of the foil (upper skin)
+    z_bot = min(zs)                     # lowest point of the foil (lower skin)
 
     # Box per the recipe.
     bx0 = x_le - WRAP_CLEAR                       # CLEAR mm ahead of the LE
@@ -382,7 +394,24 @@ def _build_wrap_shell(comp, surf, params, half_w, x_frac, chord, name):
     # Subtract the foil from the box -> block with a foil-shaped C-channel.
     fu.combine(comp, cap_body, [wing_tool],
                adsk.fusion.FeatureOperations.CutFeatureOperation)
-    return cap_body
+    # Return the body plus the box top/bottom z, so the slot cutter can limit its
+    # depth to 50% of the box height (no through-cut in the bottom).
+    return cap_body, bz1, bz0
+
+
+def _foil_loop_mm(af, x_station_mm, y_skin_station, chord):
+    """Full foil loop in station-centered mm, CURVED SUCTION SURFACE UP.
+
+    The raw airfoil + the xZ sketch plane were rendering the section UPSIDE DOWN
+    (flat side up, rounded suction bulge down). A real airfoil carries its curved
+    upper/suction surface on TOP, so we NEGATE z to flip the whole section right
+    side up. The example wing applies the same negate, so the two stay matched.
+
+    Only x (chordwise) drives the chord-% / 7%c measurement; x is untouched, so
+    this vertical flip cannot affect any percent-of-chord calculation.
+    """
+    return [((x * chord - x_station_mm), -(y * chord - y_skin_station))
+            for (x, y) in _full_airfoil_loop(af)]
 
 
 def _full_airfoil_loop(af):
